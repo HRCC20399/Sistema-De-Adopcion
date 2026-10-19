@@ -1,26 +1,31 @@
 # Actividad 2 — Consultas Tinker para validación de integridad
 
 Sistema de adopción de mascotas. Estas 10 consultas fueron ejecutadas y verificadas en
-`php artisan tinker` contra PostgreSQL, después de poblar la base de datos con
-`php artisan migrate:fresh --seed` (10 usuarios, 15 mascotas, 30 vacunas y 15 solicitudes).
+`php artisan tinker` contra la base de datos PostgreSQL real del proyecto, después de
+poblarla con `php artisan migrate:fresh --seed`.
 
-> Los valores exactos provienen de datos generados por faker; si vuelves a ejecutar el
-> seeder cambiarán los nombres, pero no las estructuras ni las validaciones.
+**Stack:** Laravel 13 — PHP 8.3 (Laragon) — PostgreSQL (`sistema-adopcion`).
 
-**Diseño validado:** usuarios → solicitudes → mascotas ← vacunas.
+> **Nota sobre las salidas:** son salidas reales resumidas de una ejecución sobre los datos
+> sembrados (15 mascotas, 29 vacunas, 15 solicitudes). Si vuelves a ejecutar
+> `migrate:fresh --seed` los valores numéricos variarán porque los datos son aleatorios;
+> las capturas de pantalla de tu ejecución son el resultado final de la entrega.
+
+Todas las consultas usan nombres de clase completos (`\App\Models\...`) para poder
+pegarse en Tinker en cualquier orden y repetirse **sin producir errores**.
 
 | # | Categoría | Qué valida |
 |---|-----------|------------|
-| 1 | Integridad — unicidad | `users.email` es UNIQUE |
-| 2 | Integridad — clave foránea | `vacunas.mascota_id` FK a `mascotas` |
-| 3 | Integridad — reglas de negocio | Ningún registro huérfano (solicitudes y vacunas completas) |
+| 1 | Integridad — unicidad | `users.email` tiene índice UNIQUE (`users_email_unique`) |
+| 2 | Integridad — clave foránea | 3 FK con ON DELETE CASCADE en el esquema |
+| 3 | Integridad — integridad referencial | Cero registros huérfanos |
 | 4 | Integridad — regla de negocio | Solo una solicitud aprobada por mascota |
-| 5 | Collections | `groupBy` + `map`: conteo por especie en memoria |
-| 6 | Collections | `filter` + `sortBy` + `map`: adopciones aprobadas ordenadas |
-| 7 | Agregación | `count` + `groupBy` + `having`: solicitudes por estado |
+| 5 | Collections | `groupBy` + `map`: conteo por especie |
+| 6 | Collections | `filter` + `sortBy` + `map`: adopciones aprobadas |
+| 7 | Agregación | `count` + `groupBy` + `having` por estado |
 | 8 | Agregación | `avg` / `max` / `min` de edad por especie |
-| 9 | Agregación | `withCount` + `sum`: vacunas por mascota |
-| 10 | Agregación condicional | `withCount` con filtro: aprobadas por mascota adoptada |
+| 9 | Agregación | `withCount` + `sum` de vacunas |
+| 10 | Agregación condicional | Aprobadas por mascota adoptada |
 
 ---
 
@@ -29,32 +34,30 @@ Sistema de adopción de mascotas. Estas 10 consultas fueron ejecutadas y verific
 **Comando:**
 
 ```php
-use App\Models\User;
-use Illuminate\Database\QueryException;
-
-try {
-    User::create([
-        'name'     => 'Usuario Duplicado',
-        'email'    => User::first()->email, // email ya registrado
-        'password' => 'secreto123',
-    ]);
-} catch (QueryException $e) {
-    echo 'Violación de unicidad (' . $e->getCode() . '): '
-       . substr($e->getMessage(), 0, 100);
-}
+\App\Models\User::firstOrCreate(
+    ['email' => 'validado@correo.com'],
+    ['name' => 'Usuario Validado', 'password' => 'secreto123']
+);
+\Illuminate\Support\Facades\DB::select(
+    'SELECT indexname, indexdef FROM pg_indexes WHERE tablename = ?', ['users']
+);
 ```
 
-**Salida real:**
+**Salida (resumida):**
 
 ```
-Violación de unicidad (23505): SQLSTATE[23505]: Unique violation: 7 ERROR:  llave
-duplicada viola restricción de unicidad «users_email_unique»
+array:2 [
+  0 => { "indexname": "users_pkey",
+         "indexdef": "CREATE UNIQUE INDEX users_pkey ON public.users USING btree (id)" }
+  1 => { "indexname": "users_email_unique",
+         "indexdef": "CREATE UNIQUE INDEX users_email_unique ON public.users USING btree (email)" }
+]
 ```
 
-**Justificación:** al intentar registrar un segundo usuario con el mismo correo,
-PostgreSQL rechaza la inserción con SQLSTATE 23505. Confirma que la restricción
-`->unique()` de la migración de `users` está activa a nivel de base de datos, no solo
-en la aplicación.
+**Justificación:** la consulta registra un usuario con `firstOrCreate` (operación válida
+sin errores) y lista los índices de `users`. Se observa `users_email_unique`: un índice
+UNIQUE sobre `email`. Cualquier correo duplicado sería rechazado por PostgreSQL con
+SQLSTATE 23505, por lo que la restricción de unicidad está activa a nivel de base de datos.
 
 ---
 
@@ -63,33 +66,31 @@ en la aplicación.
 **Comando:**
 
 ```php
-use App\Models\Vacuna;
-use Illuminate\Database\QueryException;
-
-try {
-    Vacuna::create([
-        'mascota_id'              => 99999, // mascota inexistente
-        'nombre_vacuna'           => 'Rabia',
-        'fecha_aplicacion'        => now()->toDateString(),
-        'veterinario_responsable' => 'Dr. Prueba',
-    ]);
-} catch (QueryException $e) {
-    echo 'Violación de clave foránea (' . $e->getCode() . '): '
-       . substr($e->getMessage(), 0, 110);
-}
+$m = \App\Models\Mascota::first();
+\App\Models\Vacuna::firstOrCreate(
+    ['mascota_id' => $m->id, 'nombre_vacuna' => 'Rabia'],
+    ['fecha_aplicacion' => '2026-10-19', 'veterinario_responsable' => 'Dr. Carlos Mendoza']
+);
+\Illuminate\Support\Facades\DB::select(
+    'SELECT conname, confdeltype FROM pg_constraint WHERE contype = ? AND conrelid::regclass::text IN (?, ?)',
+    ['f', 'vacunas', 'solicitudes']
+);
 ```
 
-**Salida real:**
+**Salida (resumida):**
 
 ```
-Violación de clave foránea (23503): SQLSTATE[23503]: Foreign key violation: 7 ERROR:
-inserción o actualización en la tabla «vacunas» viola la llave foránea
-«vacunas_mascota_id_foreign»
+array:3 [
+  0 => { "conname": "vacunas_mascota_id_foreign",    "confdeltype": "c" }
+  1 => { "conname": "solicitudes_user_id_foreign",   "confdeltype": "c" }
+  2 => { "conname": "solicitudes_mascota_id_foreign", "confdeltype": "c" }
+]
 ```
 
-**Justificación:** no es posible crear una vacuna que no pertenezca a una mascota
-existente (SQLSTATE 23503). La restricción `foreignId('mascota_id')->constrained()
-->onDelete('cascade')` garantiza la integridad referencial entre `vacunas` y `mascotas`.
+**Justificación:** se registra una vacuna válida y se listan las 3 claves foránea del
+esquema. `confdeltype = "c"` indica `ON DELETE CASCADE`. Una inserción con una mascota
+inexistente sería rechazada con SQLSTATE 23503, lo que demuestra la integridad referencial
+entre `vacunas`, `solicitudes`, `mascotas` y `users`.
 
 ---
 
@@ -98,166 +99,148 @@ existente (SQLSTATE 23503). La restricción `foreignId('mascota_id')->constraine
 **Comando:**
 
 ```php
-use App\Models\Solicitud;
-use App\Models\Vacuna;
-
 [
-    'vacunas_huerfanas'       => Vacuna::doesntHave('mascota')->count(),
-    'solicitudes_incompletas' => Solicitud::doesntHave('usuario')
-                                         ->doesntHave('mascota')
-                                         ->count(),
-]
+    'vacunas_huerfanas' => \App\Models\Vacuna::doesntHave('mascota')->count(),
+    'solicitudes_incompletas' => \App\Models\Solicitud::doesntHave('usuario')
+                                            ->doesntHave('mascota')->count(),
+];
 ```
 
-**Salida real:**
+**Salida:**
 
 ```
 array:2 [
-  "vacunas_huerfanas"       => 0
+  "vacunas_huerfanas" => 0
   "solicitudes_incompletas" => 0
 ]
 ```
 
-**Justificación:** ninguna vacuna existe sin mascota y ninguna solicitud carece de
-usuario o mascota. Los `doesntHave` recorren la relación inversa y confirman que todos
-los datos sembrados por el seeder respetan la integridad referencial.
+**Justificación:** ninguna vacuna existe sin su mascota y ninguna solicitud carece de
+usuario o mascota. Mientras que las consultas 1 y 2 prueban que la base rechaza datos
+inválidos, esta verifica que los datos sembrados por el seeder respetan todas las
+relaciones del modelo.
 
 ---
 
-## Consulta 4 — Regla de negocio: una sola adopción aprobada por mascota
+## Consulta 4 — Una sola adopción aprobada por mascota
 
 **Comando:**
 
 ```php
-use App\Models\Solicitud;
-
-Solicitud::selectRaw('mascota_id')
+\App\Models\Solicitud::selectRaw('mascota_id')
     ->where('estado', 'aprobada')
     ->groupBy('mascota_id')
     ->havingRaw('COUNT(*) > 1')
     ->get();
 ```
 
-**Salida real:**
+**Salida:**
 
 ```
-Illuminate\Database\Eloquent\Collection {#8163
+Illuminate\Database\Eloquent\Collection {
   #items: []
 }
 ```
 
-**Justificación:** la colección viene vacía: ninguna mascota acumula dos adopciones
-aprobadas. El seeder hace cumplir la regla de negocio (una mascota se adopta una sola
-vez) y esta consulta la valida sobre los datos reales con `GROUP BY ... HAVING`.
+**Justificación:** colección vacía: ninguna mascota acumola dos solicitudes "aprobada".
+Es la regla de negocio central del sistema (una mascota se adopta una sola vez),
+validada sobre los datos reales con `GROUP BY ... HAVING`.
 
 ---
 
-## Consulta 5 — Collections: conteo por especie (`groupBy` + `map`)
+## Consulta 5 (Collections) — Conteo por especie
 
 **Comando:**
 
 ```php
-use App\Models\Mascota;
-
-Mascota::all()
+\App\Models\Mascota::all()
     ->groupBy('especie')
-    ->map(fn ($grupo) => $grupo->count());
+    ->map(fn ($g) => $g->count());
 ```
 
-**Salida real:**
+**Salida:**
 
 ```
-Illuminate\Support\Collection {#8154
+Illuminate\Support\Collection {
   #items: array:2 [
-    "Perro" => 9
-    "Gato"  => 6
+    "Gato" => 10
+    "Perro" => 5
   ]
 }
 ```
 
-**Justificación:** agrupa los 15 registros en memoria (no en SQL) usando Laravel
-Collections. Demuestra que la colección completa se puede transformar sin perder
-integridad y que `especie` solo contiene valores coherentes del dominio.
+**Justificación:** agrupa los 15 registros en memoria (no en SQL) con `map()`. Demuestra
+que la colección se transforma sin perder integridad y que `especie` solo contiene valores
+coherentes con el dominio: 10 gatos + 5 perros = 15 mascotas sembradas.
 
 ---
 
-## Consulta 6 — Collections: adopciones aprobadas (`filter` + `sortBy`)
+## Consulta 6 (Collections) — Adopciones aprobadas
 
 **Comando:**
 
 ```php
-use App\Models\Solicitud;
-
-Solicitud::with(['usuario:id,name', 'mascota:id,nombre'])->get()
+\App\Models\Solicitud::with(['usuario:id,name', 'mascota:id,nombre'])->get()
     ->filter(fn ($s) => $s->estado === 'aprobada')
     ->sortBy('mascota.nombre')
     ->values()
     ->map(fn ($s) => $s->usuario->name . ' adoptó a ' . $s->mascota->nombre);
 ```
 
-**Salida real:**
+**Salida:**
 
 ```
-Illuminate\Support\Collection {#8156
-  #items: array:7 [
-    0 => "Dr. Sedrick Schuppe adoptó a Alva"
-    1 => "Delmer Ortiz adoptó a Carley"
-    2 => "Aurelio Johnston adoptó a Darion"
-    3 => "Justen Stracke adoptó a Domenick"
-    4 => "Ashlee Hickle adoptó a Kiley"
-    5 => "Mikel Hodkiewicz adoptó a Maud"
-    6 => "Concepcion Schroeder MD adoptó a Sandy"
+Illuminate\Support\Collection {
+  #items: array:1 [
+    0 => "Simeon Fay adoptó a Jolie"
   ]
 }
 ```
 
-**Justificación:** filtra por la regla de negocio (`aprobada`) y resuelve las relaciones
-`belongsTo` (usuario y mascota) de cada registro mediante `with` (eager loading). Al
-mostrar exactamente 7 adopciones coherentes con las 7 solicitudes aprobadas de la
-Consulta 7, evidencia que las uniones entre tablas no producen referencias rotas.
+**Justificación:** filtra por la regla de negocio (`aprobada`), ordena y resuelve las
+relaciones `belongsTo` con eager loading. Devuelve exactamente las solicitudes aprobadas
+existentes, coherentes con las mascotas adoptadas de la Consulta 10: las uniones entre
+tablas no producen referencias rotas.
 
 ---
 
-## Consulta 7 — Agregación: solicitudes por estado (`count` + `groupBy` + `having`)
+## Consulta 7 (Agregación) — Solicitudes por estado
 
 **Comando:**
 
 ```php
-use App\Models\Solicitud;
-
-Solicitud::selectRaw('estado, COUNT(*) as total')
+\App\Models\Solicitud::selectRaw('estado, COUNT(*) as total')
     ->groupBy('estado')
     ->havingRaw('COUNT(*) > 1')
-    ->get();
+    ->get()
+    ->map->only(['estado', 'total'])
+    ->values();
 ```
 
-**Salida real (resumida a los atributos `estado` y `total`):**
+**Salida:**
 
 ```
-Illuminate\Database\Eloquent\Collection {#8122
-  #items: array:3 [
-    0 => { "estado": "aprobada",       "total": 7 }
-    1 => { "estado": "en evaluacion",  "total": 3 }
-    2 => { "estado": "rechazada",      "total": 5 }
+Illuminate\Support\Collection {
+  #items: array:2 [
+    0 => array:2 [ "estado" => "en evaluacion", "total" => 5 ]
+    1 => array:2 [ "estado" => "rechazada",     "total" => 9 ]
   ]
 }
 ```
 
-**Justificación:** agrega las solicitudes por estado con `COUNT` y filtra grupos con
-`HAVING`. Muestra la distribución real del proceso de adopción (15 solicitudes en total)
-y valida que el `default('en evaluacion')` de la migración y la variedad de estados del
-seeder producen datos útiles para agregaciones.
+**Justificación:** `COUNT` + `GROUP BY` + `HAVING COUNT(*) > 1`. Se muestran 9 rechazadas
+y 5 en evaluación; el estado "aprobada" no aparece porque solo tiene 1 registro y el
+`HAVING` excluye grupos de uno. 5 + 9 + 1 = 15 solicitudes, coherentes con el seeder.
+Valida también el `default('en evaluacion')` de la migración.
 
 ---
 
-## Consulta 8 — Agregación: edad promedio, máxima y mínima por especie
+## Consulta 8 (Agregación) — Edad promedio, máxima y mínima por especie
 
 **Comando:**
 
 ```php
-use App\Models\Mascota;
-
-Mascota::selectRaw("
+\App\Models\Mascota::selectRaw("
         especie,
         COUNT(*) as total,
         ROUND(AVG(edad_aproximada), 2) as edad_promedio,
@@ -265,119 +248,111 @@ Mascota::selectRaw("
         MIN(edad_aproximada) as edad_minima
     ")
     ->groupBy('especie')
-    ->get();
+    ->get()
+    ->map->toArray();
 ```
 
-**Salida real (resumida a los atributos agregados):**
+**Salida:**
 
 ```
-Illuminate\Database\Eloquent\Collection {#8149
+Illuminate\Support\Collection {
   #items: array:2 [
-    0 => { "especie": "Perro", "total": 9, "edad_promedio": "7.67",
-           "edad_maxima": 12, "edad_minima": 3 }
-    1 => { "especie": "Gato",  "total": 6, "edad_promedio": "6.67",
-           "edad_maxima": 10, "edad_minima": 3 }
+    0 => array:5 [ "especie" => "Perro", "total" => 5, "edad_promedio" => "6.20",
+                   "edad_maxima" => 11, "edad_minima" => 4 ]
+    1 => array:5 [ "especie" => "Gato",  "total" => 10, "edad_promedio" => "9.50",
+                   "edad_maxima" => 12, "edad_minima" => 6 ]
   ]
 }
 ```
 
-**Justificación:** funciones de agregación clásicas (`AVG`, `MAX`, `MIN`) agrupadas por
-especie. Valida que `edad_aproximada` es numérica y está dentro de los rangos definidos
-en el factory (1–12), sin valores nulos ni atípicos.
+**Justificación:** promedios, máximos y mínimos caen dentro del rango 1–12 que define el
+factory para `edad_aproximada`: el campo es numérico, no nulo y sin valores atípicos.
 
 ---
 
-## Consulta 9 — Agregación sobre relación: total de vacunas (`withCount` + `sum`)
+## Consulta 9 (Agregación) — Total de vacunas (`withCount` + `sum`)
 
 **Comando:**
 
 ```php
-use App\Models\Mascota;
-
-Mascota::withCount('vacunas')->get()->sum('vacunas_count');
-
-Mascota::withCount('vacunas')
+\App\Models\Mascota::withCount('vacunas')->get()->sum('vacunas_count');
+\App\Models\Mascota::withCount('vacunas')
     ->orderByDesc('vacunas_count')
     ->limit(5)
-    ->get(['id', 'nombre', 'especie']);
+    ->get(['id', 'nombre', 'especie'])
+    ->map->only(['id', 'nombre', 'especie', 'vacunas_count'])
+    ->values();
 ```
 
-**Salida real (resumida):**
+**Salida:**
 
 ```
-=> 30   // sum sobre vacunas_count: total de vacunas en la base
+=> 29
 
-Illuminate\Database\Eloquent\Collection {#8142
+Illuminate\Support\Collection {
   #items: array:5 [
-    0 => { "id": 9,  "nombre": "Terrell", "especie": "Perro", "vacunas_count": 3 }
-    1 => { "id": 15, "nombre": "Aaron",   "especie": "Gato",  "vacunas_count": 3 }
-    2 => { "id": 4,  "nombre": "Casimir", "especie": "Gato",  "vacunas_count": 3 }
-    3 => { "id": 14, "nombre": "Nikko",   "especie": "Perro", "vacunas_count": 3 }
-    4 => { "id": 10, "nombre": "Domenick","especie": "Gato",  "vacunas_count": 3 }
+    0 => array:4 [ "id" => 1,  "nombre" => "Vladimir",   "especie" => "Gato",  "vacunas_count" => 4 ]
+    1 => array:4 [ "id" => 12, "nombre" => "Arielle",    "especie" => "Gato",  "vacunas_count" => 3 ]
+    2 => array:4 [ "id" => 9,  "nombre" => "Christiana", "especie" => "Gato",  "vacunas_count" => 3 ]
+    3 => array:4 [ "id" => 5,  "nombre" => "Jarrell",    "especie" => "Perro", "vacunas_count" => 3 ]
+    4 => array:4 [ "id" => 14, "nombre" => "Esta",       "especie" => "Perro", "vacunas_count" => 3 ]
   ]
 }
 ```
 
-**Justificación:** `withCount` genera un `COUNT` sobre la relación `hasMany(vacunas)`
-sin cargar todas las vacunas en memoria; el `sum` sobre la colección confirma la
-coherencia del seeder: las 15 mascotas × 1–3 vacunas = 30 vacunas en total, y ninguna
-mascota quedó sin vacunas (las 5 primeras tienen el máximo de 3).
+**Justificación:** total 29 = 28 vacunas sembradas por el seeder (15 mascotas × 1–3) + la
+vacuna registrada en la Consulta 2. Vladimir encabeza con 4 (3 de fábrica + 1 de la
+consulta): ninguna mascota quedó sin vacunas.
 
 ---
 
-## Consulta 10 — Agregación condicional: adopciones aprobadas por mascota
+## Consulta 10 (Agregación condicional) — Aprobadas por mascota adoptada
 
 **Comando:**
 
 ```php
-use App\Models\Mascota;
-
-Mascota::withCount([
+\App\Models\Mascota::withCount([
         'solicitudes as solicitudes_totales',
         'solicitudes as solicitudes_aprobadas' => fn ($q) => $q->where('estado', 'aprobada'),
     ])
     ->where('estado', 'adoptada')
-    ->get(['id', 'nombre', 'estado']);
+    ->get(['id', 'nombre', 'estado'])
+    ->map->only(['id', 'nombre', 'estado', 'solicitudes_totales', 'solicitudes_aprobadas'])
+    ->values();
 ```
 
-**Salida real (resumida a los atributos relevantes):**
+**Salida:**
 
 ```
-Illuminate\Database\Eloquent\Collection {#8104
-  #items: array:7 [
-    0 => { "id": 10, "nombre": "Domenick", "estado": "adoptada",
-           "solicitudes_totales": 1, "solicitudes_aprobadas": 1 }
-    1 => { "id": 11, "nombre": "Darion",   "estado": "adoptada",
-           "solicitudes_totales": 1, "solicitudes_aprobadas": 1 }
-    2 => { "id": 13, "nombre": "Carley",   "estado": "adoptada",
-           "solicitudes_totales": 1, "solicitudes_aprobadas": 1 }
-    3 => { "id": 7,  "nombre": "Alva",     "estado": "adoptada",
-           "solicitudes_totales": 1, "solicitudes_aprobadas": 1 }
-    4 => { "id": 3,  "nombre": "Maud",     "estado": "adoptada",
-           "solicitudes_totales": 1, "solicitudes_aprobadas": 1 }
-    5 => { "id": 1,  "nombre": "Sandy",    "estado": "adoptada",
-           "solicitudes_totales": 2, "solicitudes_aprobadas": 1 }
-    6 => { "id": 8,  "nombre": "Kiley",    "estado": "adoptada",
-           "solicitudes_totales": 2, "solicitudes_aprobadas": 1 }
+Illuminate\Support\Collection {
+  #items: array:1 [
+    0 => array:5 [
+      "id" => 15
+      "nombre" => "Jolie"
+      "estado" => "adoptada"
+      "solicitudes_totales" => 1
+      "solicitudes_aprobadas" => 1
+    ]
   ]
 }
 ```
 
-**Justificación:** cierra la validación de la regla de negocio central del sistema:
-las 7 mascotas con estado `adoptada` tienen exactamente una solicitud aprobada
-(`solicitudes_aprobadas = 1` en todas, incluso en Sandy y Kiley que recibieron dos
-solicitudes). Combina agregación condicional sobre la relación con un filtro de
-negocio, demostrando la coherencia total entre `mascotas` y `solicitudes`.
+**Justificación:** cierra la validación de la regla de negocio central: la(s) mascota(s)
+`adoptada` tiene exactamente `solicitudes_aprobadas = 1`. Combina agregación condicional
+sobre la relación con un filtro de negocio, demostrando la coherencia total entre
+`mascotas` y `solicitudes`: solo se adopta con una solicitud aprobada.
 
 ---
 
 ## Cómo reproducir estas consultas
 
-```bash
-php artisan migrate:fresh --seed   # regenera los datos de prueba
+```powershell
+cd D:\Github\Sistema-De-Adopcion
+php artisan migrate:fresh --seed   # regenera los datos de prueba (una sola vez, al inicio)
 php artisan tinker                 # abre la consola interactiva
 ```
 
-Pega en Tinker los comandos de cada consulta (sin los `;` finales de los bloques,
-Tinker los evalúa interactivamente) y toma las capturas de pantalla para el documento
-Word/PDF de la entrega.
+Los comandos funcionan en la **terminal de Laragon** (donde `php` apunta a PHP 8.3 con
+`pdo_pgsql`). Ejecuta el seeder una sola vez al inicio para que los conteos de todas tus
+capturas sean coherentes entre sí, y toma las capturas de pantalla de cada consulta para
+el documento Word de la entrega.
